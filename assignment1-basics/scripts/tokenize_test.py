@@ -15,7 +15,7 @@ DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
 TRAIN_TXT_DATA_PATH = os.path.join(DATA_DIR, "TinyStoriesV2-GPT4-train.txt")
 VAL_TXT_DATA_PATH = os.path.join(DATA_DIR, "TinyStoriesV2-GPT4-valid.txt")
 TRAIN_DATA_PATH = os.path.join(DATA_DIR, "train.dat")
-VAL_DATA_PATH = os.path.join(DATA_DIR, "valid.dat")
+VAL_DATA_PATH = os.path.join(DATA_DIR, "valid.dat") 
 
 special_tokens = ["<|endoftext|>"]
 
