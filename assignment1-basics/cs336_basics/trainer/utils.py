@@ -26,13 +26,16 @@ def cross_entropy(out_logit: torch.Tensor, target: torch.Tensor) -> torch.Tensor
     # 对每个样本在 vocab 维度上做 logsumexp。
     # 这是 softmax 分母取对数后的稳定写法。
     logsumexp = torch.logsumexp(input=out_logit, dim=-1, keepdim=True)
+    #keepdim=True: dim=1 还在，只是长度变成1
 
     # 交叉熵可以写成：logsumexp(logits) - 正确类别的 logit。
     # 这里得到的是每个样本各自的 loss，形状是 (B, 1)。
     loss = -get_logit + logsumexp
+    #注意区分out_logit(batch, vocab)和get_logit(batch, 1)!!! 
+    
 
     # 对 batch 维做平均，得到一个标量损失。
-    return torch.mean(loss,dim=0, keepdim=False)
+    return torch.mean(loss,dim=0, keepdim=False)#dim=0: 对batch维度（竖直）求平均，得到一个数字
     
 
  # 定义学习率调度函数：前期线性 warmup，中期余弦衰减，后期保持最小学习率。
@@ -46,14 +49,17 @@ def learning_rate_schedule(
     # 保证余弦退火的总迭代数大于 warmup 阶段，否则调度区间无效。
     assert cosine_cycle_iters>warmup_iters, 'Invalid input for iteration striction'
 
+    #阶段1：warmup直线上升
     # 如果当前还在 warmup 阶段，就从 0 线性增加到最大学习率。
     if it<warmup_iters:
         return it*max_learning_rate/warmup_iters
 
+    #阶段2：余弦梯度的逐渐下降
     # 如果当前处在余弦退火阶段，就按照 cosine 曲线从 max_lr 衰减到 min_lr。
     elif warmup_iters<=it<=cosine_cycle_iters:
         return min_learning_rate+0.5*(1+math.cos((it-warmup_iters)*math.pi/(cosine_cycle_iters-warmup_iters)))*(max_learning_rate-min_learning_rate)
 
+    #阶段3：保持最小
     # 如果已经超过退火阶段，就保持最小学习率不再变化。
     else:
         return min_learning_rate
@@ -79,7 +85,7 @@ def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: flo
 
     # 如果总范数本来就小于阈值，就什么都不做。
     if L2_norm < max_l2_norm:
-        pass
+        pass # maditation!
 
     # 如果总范数超过阈值，就按比例把每个梯度一起缩小。
     else:

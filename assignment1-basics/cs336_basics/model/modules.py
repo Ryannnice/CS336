@@ -1,50 +1,111 @@
+ # 导入 PyTorch 主包，后面会用它创建张量和参数。
 import torch 
+
+ # 导入 PyTorch 的神经网络模块基类 nn.Module，以及参数容器等工具。
 import torch.nn as nn 
+
+ # 导入 einops 里的重排与张量乘法工具，后面注意力和 RoPE 会频繁用到。
 from einops import rearrange, einsum
+
+ # 定义一个线性层类。
+ # 你可以把它理解成最基础的“全连接层”或“矩阵乘法层”。
 class Linear(nn.Module):
+    # 初始化线性层。
     def __init__(self, in_features, out_features, device=None, dtype=None):
+        # 下面的文档字符串说明这个层的输入输出维度含义。
         '''
         in_features: int final dimension of the input
         out_features: int final dimension of the output
         device: torch.device | None = None Device to store the parameters on
         dtype: torch.dtype | None = None Data type of the parameters
         '''
+        # 先调用父类构造函数，让当前类具备 nn.Module 的能力。
         super().__init__()
+
+        # 保存输入维度，表示输入向量最后一维的长度。
         self.in_features = in_features
+
+        # 保存输出维度，表示输出向量最后一维的长度。
         self.out_features = out_features
+
+        # 记录参数存放在哪个设备上，比如 cpu 或 cuda。
         self.device = device
+
+        # 记录参数采用什么数据类型，比如 float32。
         self.dtype = dtype
+
+        # 创建可训练权重矩阵，形状是 (out_features, in_features)。
+        # 这就是线性层真正要学习的参数。
         self.weight = nn.Parameter(torch.empty(out_features, in_features, device=device, dtype=dtype))
+
+        # 调用自定义初始化函数，为权重赋初值。
         self._init_weight()
+
+    # 定义前向传播：给定输入 x，输出线性变换后的结果。
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 用 einsum 实现矩阵乘法。
+        # 这里的含义是：
+        # 输入 x 的最后一维是 d_in，
+        # 权重 weight 的形状是 (d_out, d_in)，
+        # 输出的最后一维就变成 d_out。
         return einsum(x, self.weight, '... d_in,  d_out d_in -> ... d_out')
 
+    # 定义权重初始化函数。
     def _init_weight(self):
+        # 计算截断正态初始化的标准差。
+        # 这是一个和输入输出维度都相关的缩放方式。
         std = (2 / (self.in_features + self.out_features)) ** 0.5
+
+        # 用截断正态分布初始化权重。
+        # 权重不会初始化得过大，有助于训练稳定。
         torch.nn.init.trunc_normal_(self.weight, mean = 0, std=std, a=-3*std, b=3*std)
 
 
+# 定义 Embedding 层。
+# 它的作用不是做乘法，而是“查表”：输入 token id，输出对应向量。
 class Embedding(nn.Module):
+    # 初始化 embedding 层。
     def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
+        # 下面的文档字符串解释词表大小和向量维度。
         '''
         num_embeddings: int Size of the vocabulary
         embedding_dim: int Dimension of the embedding vectors, i.e., dmodel
         device: torch.device | None = None Device to store the parameters on
         dtype: torch.dtype | None = None Data type of the parameters
         '''
+        # 调用父类构造函数，注册为一个标准的 PyTorch 模块。
         super().__init__()
+
+        # 记录词表大小，也就是一共有多少个 token id。
         self.num_embeddings = num_embeddings
+
+        # 记录每个 token 对应向量的维度。
         self.embedding_dim = embedding_dim
+
+        # 创建 embedding 权重表，形状是 (词表大小, 向量维度)。
+        # 你可以把它理解成一个“大字典”，每一行对应一个 token 的向量。
         self.embed_weight = nn.Parameter(torch.empty(num_embeddings, embedding_dim, device=device, dtype=dtype))
+
+        # 调用初始化函数，为整张 embedding 表赋初值。
         self._init_weight()
+
+    # 定义前向传播：输入 token id，返回对应的 embedding 向量。
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        # 如果输入已经是 long 类型，就直接使用。
         if token_ids.dtype == torch.long:
             pass
+
+        # 否则强制转成 long，因为张量索引必须使用整数类型。
         else:
             token_ids = token_ids.long()
+
+        # 直接用 token_ids 作为索引，从 embedding 表中取出对应行。
+        # 这就是“查表”操作。
         return self.embed_weight[token_ids]
 
+    # 定义 embedding 表的初始化方式。
     def _init_weight(self):
+        # 用截断正态分布初始化每个 token 向量。
         nn.init.trunc_normal_(self.embed_weight, mean=0.0, std=1.0, a=-3.0, b=3.0)
 
 
