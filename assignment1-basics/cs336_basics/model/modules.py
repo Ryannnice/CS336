@@ -334,6 +334,24 @@ def scaled_dot_product_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tens
     # 最终得到的分数张量形状是 (..., S_q, S_k)。
     # 再除以 sqrt(D)，是为了避免维度大时分数过大，softmax 过尖。
     q_k_score = einsum(q, k, '... s_q d, ... s_k d -> ... s_q s_k') / q.size(-1)**0.5 # 得到注意力矩阵
+    """
+    核心：对于注意力矩阵运算：矩阵大小是 S x Q/K/V  
+    S、Q/K/V是最后两个维度。
+    D_model 先分别投影成 Q、K、V 然后每个 Q/K/V 再拆成：num_heads * d_k
+    但是运算的时候需要 S x Q/K/V  
+    所以把注意力头维度直接移到 S 前面，不做数值运算，而是通过广播复制运算操作。
+
+    Q: (B, H, S_q, d_k)
+    K: (B, H, S_k, d_k)
+
+    QK^T -> (B, H, S_q, S_k)
+    
+    其中：
+    - d_k 被点积求和掉了
+    - B 和 H 保留下来
+    - 得到每个 head 的注意力分数矩阵
+    """
+
 
     # 如果传入了 mask，就把不允许关注的位置直接设成负无穷。
     # 这样它们经过 softmax 后权重会变成 0。
@@ -387,7 +405,7 @@ class multihead_self_attention(nn.Module):
         q_i = rearrange(q_i, 'b s (n_h d_k) -> b n_h s d_k', n_h=self.num_heads) 
         k_i = rearrange(k_i, 'b s (n_h d_k) -> b n_h s d_k', n_h=self.num_heads)
         v_i = rearrange(v_i, 'b s (n_h d_k) -> b n_h s d_k', n_h=self.num_heads)
-        
+
 
         # RoPE 只作用在 Q/K 上，不作用在 V 上。
         # 因为位置编码的作用是改变注意力分数的相对位置信息，
@@ -399,12 +417,17 @@ class multihead_self_attention(nn.Module):
         if self.use_causal_mask:
             # causal mask 形状为 (1, 1, S, S)，会自动广播到 batch 和 head。
             # 这样当前位置只能看到自己以及之前的 token，不能偷看未来信息。
-            mask = self.causal_mask(q_i.size(-2))
+            mask = self.causal_mask(q_i.size(-2)) # q_i.size(-2) 是 q_i 倒数第二维度：S
             mask = mask.to(device=q_i.device)
         atten = scaled_dot_product_attention(q_i, k_i, v_i, mask)
 
         # 把多头结果重新拼回最后一维，恢复到 (B, S, D_model)。
         atten = rearrange(atten, 'b n_h s d_k -> b s (n_h d_k)', n_h=self.num_heads)
+        """
+        恢复到 (B, S, D_model)
+        恢复到 (B, S, D_model)
+        恢复到 (B, S, D_model)
+        """
 
         # 最后再做一次输出投影，得到注意力子层的输出。
         out = self.w_o(atten)
