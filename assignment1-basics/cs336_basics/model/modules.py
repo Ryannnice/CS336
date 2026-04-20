@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn 
 
  # 导入 einops 里的重排与张量乘法工具，后面注意力和 RoPE 会频繁用到。
+ # RoPE: 2048维度向量，进行1024次二位旋转：[v_1, v_2], [v_3, v_4], [v_5, v_6], ..., [v_2047, v_2048]
 from einops import rearrange, einsum
 
  # 定义一个线性层类。
@@ -36,7 +37,7 @@ class Linear(nn.Module):
 
         # 创建可训练权重矩阵，形状是 (out_features, in_features)。
         # 这就是线性层真正要学习的参数。
-        self.weight = nn.Parameter(torch.empty(out_features, in_features, device=device, dtype=dtype))
+        self.weight = nn.Parameter(torch.empty(out_features, in_features, device=device, dtype=dtype)) # 后续有Linear时，会默认初始化到这里的权重
 
         # 调用自定义初始化函数，为权重赋初值。
         self._init_weight()
@@ -54,10 +55,12 @@ class Linear(nn.Module):
     def _init_weight(self):
         # 计算截断正态初始化的标准差。
         # 这是一个和输入输出维度都相关的缩放方式。
+        # Xavier 初始化的目标是使得 每一层的输入输出的方差 尽量保持一致，避免梯度在反向传播过程中消失或爆炸
         std = (2 / (self.in_features + self.out_features)) ** 0.5
 
         # 用截断正态分布初始化权重。
         # 权重不会初始化得过大，有助于训练稳定。
+        # a 和 b 分别表示 截断正态分布（Truncated Normal Distribution）中的下限和上限
         torch.nn.init.trunc_normal_(self.weight, mean = 0, std=std, a=-3*std, b=3*std)
 
 
@@ -108,28 +111,61 @@ class Embedding(nn.Module):
         # 用截断正态分布初始化每个 token 向量。
         nn.init.trunc_normal_(self.embed_weight, mean=0.0, std=1.0, a=-3.0, b=3.0)
 
-
+# 定义 RMSNorm 层。
+# 它的作用是把向量的数值尺度拉回到更稳定的范围，
+# 让训练过程不容易因为数值过大或过小而发散。
 class RMSNorm(nn.Module):
+    # 初始化 RMSNorm 层。
     def __init__(self, d_model: int, eps: float = 1e-5, device=None, dtype=None):
+        # 下面的文档字符串说明隐藏维度和数值稳定项的含义。
         '''
         d_model: int Hidden dimension of the model
         eps: float = 1e-5 Epsilon value for numerical stability
         device: torch.device | None = None Device to store the parameters on
         dtype: torch.dtype | None = None Data type of the parameters
         '''
+        # 调用父类构造函数，把当前类注册成标准神经网络模块。
         super().__init__()
+
+        # 保存隐藏维度大小，也就是最后一维的长度。
         self.d_model = d_model
+
+        # 保存一个很小的正数，防止后面除以 0。
         self.eps = eps
+
+        # 创建可学习的缩放参数，形状是 (d_model,)。
+        # RMSNorm 不会像 LayerNorm 那样再额外学习 bias，
+        # 这里只学习一个逐维缩放因子。
         self.g_weight = nn.Parameter(torch.empty(d_model, device=device, dtype=dtype))
+        # g_weight是个一维的向量！长度为 d_model
+
+        # 调用初始化函数，为缩放参数赋初值。
         self._init_weight()
+
+    # 定义前向传播：输入一个向量，输出归一化后的向量。
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 先记录输入原本的数据类型，最后返回前要转回去。
         in_dtype = x.dtype
+
+        # 先把输入转成 float32 来做归一化计算，
+        # 这样数值更稳定，特别是在 fp16/bf16 下更安全。
         x = x.to(dtype=torch.float32)
+
+        # 计算每个向量的 RMS。
+        # 这里是沿最后一维求平方平均，再开根号。
+        # keepdim=True 的目的是保留最后一维，方便后面逐元素相除。
         rms = torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True)+self.eps)
+
+        # 先用 x / rms 完成归一化，
+        # 再乘上可学习参数 g_weight，恢复模型需要的表达能力。
         out = einsum(x/rms, self.g_weight, '... d, d -> ... d')
+
+        # 最后把输出转回输入原本的数据类型。
         return out.to(dtype=in_dtype)
     
+    # 定义 RMSNorm 的参数初始化方式。
     def _init_weight(self):
+        # 用截断正态分布初始化缩放参数。
         nn.init.trunc_normal_(self.g_weight, mean=0.0, std=1.0, a=-3.0, b=3.0)
 
 class SwiGLU(nn.Module):
@@ -218,13 +254,14 @@ class RotaryPositionalEmbedding(nn.Module):
         sin = theta.sin().repeat_interleave(2, dim=-1)
 
         # 当 x 是 (B, H, S, Dh) 时，cos/sin 可能还是 (B, S, Dh) 或 (S, Dh)。
+        # 只要 cos/sin 的维度数还比 x 少，就继续在 sequence 前面补一个 1 维  
         # 这里持续在 sequence 维前面插入一个维度，使其最终能对 head 维进行广播。
         # 例如：
         # - (S, Dh)    -> (1, S, Dh)    -> (1, 1, S, Dh)
         # - (B, S, Dh) -> (B, 1, S, Dh)
         while cos.ndim < x.ndim:
-            cos = cos.unsqueeze(-3)
-            sin = sin.unsqueeze(-3)
+            cos = cos.unsqueeze(-3) # 在倒数第三个位置插一个长度为 1 的新维度
+            sin = sin.unsqueeze(-3) # 在倒数第三个位置插一个长度为 1 的新维度
 
         # 将 cos/sin 的 dtype 对齐到输入，避免 float32 和 bf16/fp16 混合计算带来额外转换。
         cos = cos.to(dtype=x.dtype)
@@ -259,31 +296,56 @@ class RotaryPositionalEmbedding(nn.Module):
         # 再还原回原始最后一维的布局，方便和输入逐元素相乘。
         return rearrange(x, '... s r -> ... (s r)')
 
-
+# 定义 softmax 函数。
+# 它会把一组任意实数分数变成“总和为 1 的权重”。
 def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
+    # 下面的文档字符串说明输入张量和归一化维度的含义。
     '''
     x: torch.Tensor Input of the softmax
     dim: int The dimension of x that you want to impelement softmax to.
     '''
-    x = x - torch.max(x, dim=dim, keepdim=True).values
+    # 先减去当前维度上的最大值。
+    # 这一步不会改变 softmax 结果，但能显著提升数值稳定性，
+    # 防止 exp 之后出现过大的数。
+    x = x - torch.max(x, dim=dim, keepdim=True).values # 第“dim”维度被压成 1
+
+    # 对每个元素取指数，把分数变成正数。
     x = torch.exp(x)
+
+    # 用每个元素除以同一维度上的总和，
+    # 得到一个归一化后的概率分布。
     return x / torch.sum(x, dim=dim, keepdim=True)
 
 
-
+# 定义缩放点积注意力。
+# 这是 Transformer 注意力机制里最核心的一步：
+# 先算“谁和谁相关”，再按相关性对 V 做加权求和。
 def scaled_dot_product_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    # 下面的文档字符串给出 q、k、v 和 mask 的常见形状。
     '''
     q: (B, S_q, D)
     k: (B, S_k, D)
     v: (B, S_v, D)
     mask: (B, S_q, S_k) or None
     '''
-    q_k_score = einsum(q, k, '... s_q d, ... s_k d -> ... s_q s_k') / q.size(-1)**0.5
-    #add mask
+    # 计算 q 和 k 的点积分数。
+    # 这一步在语义上是在问：
+    # “第 i 个 query 应该多关注第 j 个 key？”
+    # 最终得到的分数张量形状是 (..., S_q, S_k)。
+    # 再除以 sqrt(D)，是为了避免维度大时分数过大，softmax 过尖。
+    q_k_score = einsum(q, k, '... s_q d, ... s_k d -> ... s_q s_k') / q.size(-1)**0.5 # 得到注意力矩阵
+
+    # 如果传入了 mask，就把不允许关注的位置直接设成负无穷。
+    # 这样它们经过 softmax 后权重会变成 0。
     if mask is not None:
         q_k_score = q_k_score.masked_fill(mask == False, float('-inf'))
+
+    # 在 key 这一维上做 softmax，把原始分数变成注意力权重。
     q_k_attention = softmax(q_k_score, dim=-1)
-    return einsum(q_k_attention, v, '... s_q s_k, ... s_k d -> ... s_q d')
+
+    # 用注意力权重对 v 做加权求和，
+    # 得到每个 query 位置最终聚合出的上下文表示。
+    return einsum(q_k_attention, v, '... s_q s_k, ... s_k d -> ... s_q d') # 得到 Z 
 
 class multihead_self_attention(nn.Module):
     def __init__(self, d_model, num_heads, position_embedding: nn.Module = RotaryPositionalEmbedding, max_seq_len = None, theta = None, token_positions = None, device=None, dtype=None, use_causal_mask=True):
@@ -306,9 +368,12 @@ class multihead_self_attention(nn.Module):
         if position_embedding is not None and max_seq_len is not None and theta is not None:
             self.pe = position_embedding(theta, self.d_k, max_seq_len)
         self.token_positions = token_positions
+
+
     def causal_mask(self, seq_len):
         mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
-        return mask.unsqueeze(0).unsqueeze(0)
+        return mask.unsqueeze(0).unsqueeze(0) #在第 0 维插入一个长度为 1 的新维度
+        # 插入两次，变成 (1, 1, seq_len, seq_len)
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -319,9 +384,10 @@ class multihead_self_attention(nn.Module):
 
         # 再把最后一维拆成 (num_heads, d_k)，得到标准多头注意力形状：
         # (B, S, D_model) -> (B, H, S, d_k)
-        q_i = rearrange(q_i, 'b s (n_h d_k) -> b n_h s d_k', n_h=self.num_heads)
+        q_i = rearrange(q_i, 'b s (n_h d_k) -> b n_h s d_k', n_h=self.num_heads) 
         k_i = rearrange(k_i, 'b s (n_h d_k) -> b n_h s d_k', n_h=self.num_heads)
         v_i = rearrange(v_i, 'b s (n_h d_k) -> b n_h s d_k', n_h=self.num_heads)
+        
 
         # RoPE 只作用在 Q/K 上，不作用在 V 上。
         # 因为位置编码的作用是改变注意力分数的相对位置信息，
