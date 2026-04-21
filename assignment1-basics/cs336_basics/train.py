@@ -56,7 +56,7 @@ from cs336_basics.trainer.utils import cross_entropy, learning_rate_schedule, gr
 from cs336_basics.check_pointing import save_checkpoint, load_checkpoint
 
 # 定义命令行参数解析函数。
-def parse_args():
+def parse_args(): # <--- 这是你自定义的函数名
     # 创建参数解析器。
     parser = argparse.ArgumentParser(description='Train a Transformer language model')
     
@@ -148,7 +148,10 @@ def parse_args():
     parser.add_argument('--no_wandb', action='store_true', help='Disable wandb logging')
     
     # 返回解析好的参数对象。
-    return parser.parse_args()
+    return parser.parse_args() # <--- 这是库函数的方法名
+    # “自己调用自己”其实是 “命名重合” 导致的视觉错觉：
+    # 外层的 parse_args() 是你起的函数名（包装盒）
+    # 内层的 parser.parse_args() 是 argparse 库提供的方法名（核心引擎）
 
 # 定义设备选择函数。
 def get_device(device_arg):
