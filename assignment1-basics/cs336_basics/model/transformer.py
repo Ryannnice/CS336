@@ -182,7 +182,7 @@ class transformer_lm(nn.Module):
 
         # 依次通过每一层 Transformer block。
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x) # TRANSFORMER BLOCKS ARE AT HERE
 
         # 经过所有 block 后，再做一次输出归一化。
         x = self.output_norm(x)
@@ -193,3 +193,9 @@ class transformer_lm(nn.Module):
         # 返回 logits。
         # 这里不做 softmax，因为训练时 cross entropy 会自己处理 logits。
         return x
+        """
+        x: (B, S, vocab_size)
+        - 第 1 维 B: 第几个样本
+        - 第 2 维 S: 样本中的第几个 token 位置
+        - 第 3 维 V: 对词表里每个 token 的打分
+        """

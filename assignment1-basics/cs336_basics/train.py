@@ -174,6 +174,12 @@ def get_device(device_arg):
     return device_arg
 
 # 定义用 memmap 方式读取数据集的函数。
+"""
+np.memmap (Memory-mapped file) 的本质是：把硬盘上的文件，伪装成内存中的数组。
+传统读取：硬盘 $\rightarrow$ 内存 $\rightarrow$ CPU 计算。文件多大，内存就得占多大。
+memmap 读取：它只在内存里建立一个“索引表”。
+只有当真正访问某个索引（比如 dataset[100:200]）时，操作系统才会把这部分数据从硬盘调入内存（Page In）。
+"""
 def get_dataset_memmap(path, dtype=np.uint16):
     """Load dataset using memory mapping for efficiency"""
     # 如果路径不存在，就直接报错。
@@ -182,6 +188,7 @@ def get_dataset_memmap(path, dtype=np.uint16):
 
     # 用 NumPy 的 memmap 只映射文件，不一次性全部读入内存。
     dataset = np.memmap(path, dtype=dtype, mode='r')
+    # mode='r': 以 只读 (Read-only) 模式打开。这能防止训练脚本意外修改原始数据集，并允许操作系统在多个进程间安全地共享这块映射区域。
 
     # 返回映射后的数据集对象。
     return dataset
@@ -214,21 +221,25 @@ def main():
     
     # 构造 Transformer 语言模型。
     model = transformer_lm(
-        vocab_size=args.vocab_size,
-        context_length=args.context_len,
-        num_layers=args.num_layers,
-        d_model=args.d_model,
-        num_heads=args.num_heads,
-        rope_theta=args.rope_theta,
-        d_ff=args.d_ff
+        vocab_size     =    args.vocab_size,
+        context_length =    args.context_len,
+        num_layers     =    args.num_layers,
+        d_model        =    args.d_model,
+        num_heads      =    args.num_heads,
+        rope_theta     =    args.rope_theta,
+        d_ff           =    args.d_ff
     ).to(device)
-    
-    # 统计模型总参数量。
-    total_params = sum(p.numel() for p in model.parameters())
 
-    # 打印参数量。
-    print(f"Model initialized with {total_params} parameters")
+
     
+
+    # 统计模型总参数量
+    total_params = sum(p.numel() for p in model.parameters()) 
+    # p.numel: PyTorch 张量（Tensor）的一个方法，返回该张量中包含的元素总数
+    # model.parameters(): 是一个生成器（Generator），它会遍历模型中所有被注册为 nn.Parameter 的张量。
+    # 内存优势：这里没有使用列表推导式（即没有用 []），这意味着它不会在内存里先创建一个包含所有数字的列表，而是边遍历边累加，非常省内存
+    print(f"Model initialized with {total_params} parameters") # 打印参数量。
+
     # 如果启用了 wandb，就把参数量记到日志里。
     if not args.no_wandb:
         wandb.log({'model/total_parameters': total_params})
@@ -236,10 +247,10 @@ def main():
     # 创建 AdamW 优化器，并把模型参数交给它管理。
     optimizer = AdamW(
         model.parameters(),
-        lr=args.max_lr,
-        betas=(args.beta1, args.beta2),
-        eps=args.eps,
-        weight_decay=args.weight_decay
+        lr           = args.max_lr,
+        betas        = (args.beta1, args.beta2),
+        eps          = args.eps,
+        weight_decay = args.weight_decay
     )
     
     # 如果用户没有给数据目录，就直接报错。
@@ -248,22 +259,25 @@ def main():
     
     # 拼出训练集 token 文件路径。
     train_data_path = os.path.join(args.data_dir, 'train.dat')
-
     # 拼出验证集 token 文件路径。
     val_data_path = os.path.join(args.data_dir, 'valid.dat')
     
+
     # 用 memmap 加载训练数据。
     train_data = get_dataset_memmap(train_data_path)
-
     # 用 memmap 加载验证数据。
     val_data = get_dataset_memmap(val_data_path)
     
+
     # 打印训练集 token 数量。
     print(f"Train data size: {len(train_data)} tokens")
-
     # 打印验证集 token 数量。
     print(f"Val data size: {len(val_data)} tokens")
-    
+
+
+
+
+
     # 默认从第 0 步开始训练。
     start_iter = 0
 
@@ -278,81 +292,90 @@ def main():
         # 打印恢复后的起始步数。
         print(f"Resumed from iteration {start_iter}")
     
-    # 切到训练模式。
+
+
+
+
+    # 切到训练模式
     model.train()
 
     # 用列表记录训练过程中每一步的 loss。
     train_losses = []
     
-    # 创建训练进度条。
+    # 创建训练进度条 progress bar  
+    # 本质上是一个 可迭代对象（Iterable）,包裹了你的循环范围 range(...)，每当循环运行一次就内部计数一次，并刷新屏幕上的进度显示
     pbar = tqdm(range(start_iter, args.train_steps), 
-                desc="Training", 
-                initial=start_iter, 
-                total=args.train_steps)
+                desc    = "Training", 
+                
+                initial = start_iter, 
+                total   = args.train_steps
+                ) # default = 6000 
     
     # 遍历每一个训练步。
+    # pbar 包裹的是 range(start_iter, args.train_steps)，所以 iter_num 会依次取其中的每一个值
     for iter_num in pbar:
         # 根据当前步数计算学习率。
         lr = learning_rate_schedule(
             iter_num,
+
             args.max_lr,
             args.min_lr,
             args.warm_up_it,
             args.cosine_it
         )
         
-        # 把当前学习率写回优化器的每个参数组。
+        # 把当前学习率写回优化器的 每个 参数组
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
         
-        # 从训练数据中随机采样一个 batch。
+        # 从训练数据中 随机 采样一个 batch
         input_ids, target_ids = data_loading(
-            train_data,
+            train_data, # 测试数据
             args.batch_size,
             args.context_len,
-            device=device
+            device = device
         )
         
-        # 再显式确保输入是 long 类型并放到正确设备上。
-        input_ids = input_ids.long().to(device)
-
-        # 再显式确保目标是 long 类型并放到正确设备上。
+        # 再显式确保输入、目标是 long 类型并放到正确设备上
+        input_ids  = input_ids.long().to(device)
         target_ids = target_ids.long().to(device)
         
-        # 先清空上一步残留的梯度。
+        # 先清空上一步残留的梯度: 
         optimizer.zero_grad()
 
-        # 做一次前向传播，得到每个位置的词表 logits。
-        logits = model(input_ids)
+        # 做一次前向传播，得到每个位置的词表 logits
+        logits = model(input_ids) # model 是 transformer_lm()，接收张量作为输入
         
-        # 为了计算交叉熵，把 logits 展平成二维：
-        # (batch * seq, vocab_size)。
-        logits_flat = logits.view(-1, logits.size(-1))
 
-        # 把目标 token id 也展平成一维：
-        # (batch * seq,)。
-        targets_flat = target_ids.view(-1)
-        
+        # 为了计算交叉熵，把 logits 展平成二维：(batch * seq, vocab_size)
+        logits_flat = logits.view(-1, logits.size(-1))
+        # 把目标 token id 展平成一维：(batch * seq,)
+        targets_flat = target_ids.view(-1) # 这是目标词的 index。会送到cross_entropy()中再查询对应的词
+    
         # 计算当前 batch 的语言模型 loss。
-        loss = cross_entropy(logits_flat, targets_flat)
+        loss = cross_entropy(logits_flat, targets_flat) # in utils.py, line 
         
+
         # 反向传播，给所有可训练参数计算梯度。
         loss.backward()
         
         # 在更新参数前做梯度裁剪，避免梯度过大。
         gradient_clipping(model.parameters(), args.clip_grad_norm)
         
+
         # 调用优化器更新参数。
         optimizer.step()
+
+    
         
         # 把当前 loss 记录到历史列表里。
         train_losses.append(loss.item())
-        
+
         # 如果到了日志记录步，就更新显示并写 wandb。
         if iter_num % args.log_intervals == 0:
+            
             # 取最近 100 步的平均 loss；如果还不到 100 步，就对已有 loss 求平均。
             avg_loss = np.mean(train_losses[-100:]) if len(train_losses) >= 100 else np.mean(train_losses)
-
             # 根据平均 loss 计算 perplexity。
             perplexity = np.exp(avg_loss)
             
@@ -360,10 +383,9 @@ def main():
             pbar.set_postfix({
                 'Loss': f'{loss.item():.4f}',
                 'Avg_Loss': f'{avg_loss:.4f}',
-                'PPL': f'{perplexity:.2f}',
+                'PPL(perplexity)': f'{perplexity:.2f}',
                 'LR': f'{lr:.2e}'
             })
-            
             # 如果启用了 wandb，就同步记录训练指标。
             if not args.no_wandb:
                 wandb.log({
@@ -374,7 +396,10 @@ def main():
                     'iteration': iter_num
                 })
         
-        # 如果到了验证步，并且不是第 0 步，就切到验证流程。
+
+
+
+        # 验证步：
         if iter_num % args.val_interval == 0 and iter_num > 0:
             # 切到评估模式。
             model.eval()
@@ -385,22 +410,29 @@ def main():
             # 关闭梯度计算，节省显存和计算。
             with torch.no_grad():
                 # 连续采样若干个验证 batch。
-                for _ in range(args.val_batches):
+                for _ in range(args.val_batches): # 采集“val_batches”条数据：
                     # 从验证数据中采样 batch。
                     # 注意：这里的调用方式和当前 data_loading 的签名不完全一致，
                     # 阅读时先把它理解成“验证时也需要取 input/target batch”。
                     val_input_ids, val_target_ids = data_loading(
-                        val_data,
+                        val_data, # 验证数据
                         args.batch_size,
-                        args.context_len
+                        args.context_len,
+                        device = device
                     )
                     
+                    """
                     # 把验证输入转成 long 并移动到设备上。
                     val_input_ids = torch.from_numpy(val_input_ids).long().to(device)
-
                     # 把验证目标转成 long 并移动到设备上。
                     val_target_ids = torch.from_numpy(val_target_ids).long().to(device)
+                    """
+                    # data_loading 已经返回 tensor，这里只需确保类型和设备正确。
+                    val_input_ids = val_input_ids.long().to(device)
+                    # 目标张量同理处理。
+                    val_target_ids = val_target_ids.long().to(device)
                     
+
                     # 前向传播得到验证 logits。
                     val_logits = model(val_input_ids)
 
@@ -436,6 +468,9 @@ def main():
             # 验证结束后切回训练模式。
             model.train()
         
+
+
+
         # 如果到了 checkpoint 保存步，就保存一次训练现场。
         if iter_num % args.save_intervals == 0 and iter_num > 0:
             # 生成当前 checkpoint 文件名。
@@ -450,22 +485,32 @@ def main():
     # 训练结束后关闭进度条。
     pbar.close()
     
+
     # 生成最终 checkpoint 的文件路径。
     final_checkpoint_path = os.path.join(args.save_ckp_path, f'checkpoint_final_{args.train_steps}.pt')
-
     # 保存训练结束时的最终 checkpoint。
     save_checkpoint(model, optimizer, args.train_steps, final_checkpoint_path)
-
     # 打印最终 checkpoint 路径。
     print(f"Final checkpoint saved: {final_checkpoint_path}")
 
     # 打印训练完成信息。
     print("Training completed!")
-    
+
     # 如果启用了 wandb，就正常结束本次 run。
     if not args.no_wandb:
         wandb.finish()
 
+
+
 # 如果当前文件是作为主程序运行，就执行 main。
 if __name__ == '__main__':
     main()
+
+"""
+  一个 Python 文件有两种用法：  
+  1. 直接运行: python train.py  
+  2. 被别的文件 import: import train  
+
+  - 直接运行时, Python 会把这个文件的 __name__ 设成 '__main__'  
+  - 被 import 时, __name__ 会变成模块名，比如 'train'  
+"""

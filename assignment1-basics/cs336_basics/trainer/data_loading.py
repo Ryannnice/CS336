@@ -34,17 +34,15 @@ def data_loading(dataset: npt.NDArray, batch_size: int, context_length: int, dev
         # 随机选择当前样本的起始位置。
         # 这里要保证后面还能取到 context_length 个输入 token，
         # 以及再往后 1 位的目标 token。
-        start_idx = torch.randint(0, dataset_len-context_length, (1, )).item()
+        start_idx = torch.randint(0, dataset_len-context_length, (1, )).item() # 随机采样
 
         # 从数据集中切出一段连续 token，作为模型输入。
-        input_seq = dataset[start_idx: start_idx+context_length]
-
+        input_seq = dataset[start_idx : start_idx + context_length]
         # 再把这段序列整体向右平移一位，作为“下一个 token”的监督信号。
-        input_target = dataset[start_idx+1: start_idx+context_length+1]
+        input_target = dataset[start_idx+1 : start_idx + context_length+1]
 
         # 把当前输入序列转成 PyTorch 张量，并放进第 i 条样本。
         inputs[i] = torch.tensor(input_seq, dtype=torch.long)
-
         # 把当前目标序列转成 PyTorch 张量，并放进第 i 条样本。
         targets[i] = torch.tensor(input_target, dtype=torch.long)
     
