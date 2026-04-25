@@ -14,16 +14,16 @@ import argparse
 # 导入 PyTorch，用于张量、模型前向和采样。
 import torch
 
-# 导入 NumPy；当前文件里没有直接使用，但保留原始依赖声明。
+# 导入 NumPy；当前文件里没有直接使用，但保留原始依赖声明
 import numpy as np
 
-# 导入类型标注工具，帮助说明函数参数和返回值类型。
+# 导入类型标注工具，帮助说明函数参数和返回值类型
 from typing import List, Optional, Union
 
-# 导入 sys，用来修改 Python 的模块搜索路径。
+# 导入 sys，用来修改 Python 的模块搜索路径
 import sys
 
-# 导入 os，用来处理文件路径。
+# 导入 os，用来处理文件路径
 import os
 
 # 把项目根目录加入 Python 路径，确保当前脚本能导入仓库里的模块。
@@ -39,69 +39,113 @@ from cs336_basics.check_pointing import load_checkpoint
 from cs336_basics.trainer.AdamW import AdamW
 
 
-# 定义带 temperature 的 softmax 函数。
+# 定义带 temperature 的 softmax 函数
 def softmax_with_temperature(logits: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
     """
-    对 logits 先做 temperature 缩放，再做 softmax，得到概率分布。
+    对 logits 先做 temperature 缩放，再做 softmax, 得到概率分布
 
     Args:
-        logits: 原始 logits，形状通常是 (..., vocab_size)
+        logits: 原始 logits, 形状通常是 (..., vocab_size)
         temperature: 温度参数；越小分布越尖锐，越大分布越平缓
 
-    Returns:
-        加入 temperature 后的 softmax 概率
-    """
-    # 先用 temperature 缩放 logits。
-    scaled_logits = logits / temperature
+    Returns:  
+        加入 temperature 后的 softmax 概率  
+    """  
+    # 先用 temperature 缩放 logits  
+    scaled_logits = logits / temperature  
 
-    # 为了数值稳定，先找出最后一维的最大值。
-    max_logits = torch.max(scaled_logits, dim=-1, keepdim=True)[0]
+    # 为了数值稳定，先找出最后一维的最大值  
+    max_logits = torch.max(scaled_logits, dim=-1, keepdim=True)[0] # [0]: value; [1]: index  
 
-    # 每个 logit 先减去最大值，再做指数运算，避免数值过大。
-    exp_logits = torch.exp(scaled_logits - max_logits)
+    # 每个 logit 先减去最大值，再做指数运算，避免数值过大  
+    exp_logits = torch.exp(scaled_logits - max_logits)  
 
-    # 用指数值除以总和，得到规范化后的概率分布。
-    probabilities = exp_logits / torch.sum(exp_logits, dim=-1, keepdim=True)
+    # 用指数值除以总和，得到规范化后的概率分布  
+    probabilities = exp_logits / torch.sum(exp_logits, dim=-1, keepdim=True)  
 
-    # 返回概率分布。
-    return probabilities
+    # 返回概率分布    
+    return probabilities # 是个矩阵    
 
 
-# 定义 top-p 采样前的概率裁剪函数。
+# 定义 top-p 采样前的概率裁剪函数
 def top_p_sampling(probabilities: torch.Tensor, p: float = 0.9) -> torch.Tensor:
     """
-    对概率分布应用 top-p（nucleus）采样，只保留累计概率达到阈值 p 的那部分 token。
+    对概率分布应用 top-p (nucleus)采样, 只保留累计概率达到阈值 p 的那部分 token。
 
-    Args:
+    Args: 
         probabilities: 输入概率分布，形状通常是 (..., vocab_size)
         p: 累计概率阈值
 
     Returns:
         过滤并重新归一化后的概率分布
     """
-    # 按最后一维从大到小排序，方便做累计概率截断。
+    # 按最后一维从大到小[排序]，方便做累计概率截断
     sorted_probs, sorted_indices = torch.sort(probabilities, descending=True, dim=-1)
+    # sorted_indices: 已排序索引 
 
-    # 沿最后一维做累计求和，得到累计概率。
+    # 沿最后一维做累计求和，得到累计概率
     cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+    """
+    cumsum = cumulative sum = 累计和
+
+    比如： x = [0.4, 0.3, 0.2, 0.1]
+    那么： torch.cumsum(x, dim=-1)
+    结果是： [0.4, 0.7, 0.9, 1.0]
+    """
 
     # 标记累计概率还没有超过 p 的那些 token。
-    mask = cumulative_probs <= p
+    mask = cumulative_probs <= p # 如果没达到，mask 标记为 1
+    """
+    top-p: 累积概率表  
+    因为 top-p 的目标不是： “每个 token 概率必须大于某个阈值”  
+    而是： “保留一小撮最可能的 token, 使它们加起来至少覆盖总概率的 p”  
 
-    # 无论如何都保留当前概率最大的 token，避免全部被过滤掉。
-    mask[..., 0] = True
+    top-p 的设计思想是：  
+    - 模型很确定时，候选集合自动变小  
+    - 模型不确定时，候选集合自动变大  
+    """
 
-    # 对不在 nucleus 里的 token 置零。
-    filtered_probs = sorted_probs * mask.float()
+    # 无论如何都保留当前概率最大的 token，避免全部被过滤掉   
+    mask[..., 0] = True # 取最后一维上索引为 0 的那一列 / 那个位置（排序后，这是最大值）  
+    # 对不在 nucleus 里的 token 置零  
+    filtered_probs = sorted_probs * mask.float()   
+    # 对剩余概率重新归一化，使最后一维和重新变成 1： 
+    filtered_probs = filtered_probs / torch.sum(filtered_probs, dim=-1, keepdim=True)   
+    """
+    filtered_probs / torch.sum(filtered_probs, dim=-1, keepdim=True): 
 
-    # 对剩余概率重新归一化，使最后一维和重新变成 1。
-    filtered_probs = filtered_probs / torch.sum(filtered_probs, dim=-1, keepdim=True)
+     [1][2][3][4][5]   /   [5]         [ ][ ][ ][ ][ ]    
+     [1][2][3][4][5]   /   [5]    =    [ ][ ][ ][ ][ ]    
+     [5][6][7][8][9]   /   [9]         [ ][ ][ ][ ][ ]    
+     [5][6][7][8][9]   /   [9]         [ ][ ][ ][ ][ ]    
+    
+    """
 
-    # 创建一个和原始输入同形状的全零张量，用来放回原顺序下的概率。
-    output_probs = torch.zeros_like(probabilities)
+    # 创建一个[和原始输入同形状]的全零张量，用来放回原顺序下的概率   
+    output_probs = torch.zeros_like(probabilities)   
+    
+    # 按照排序前的原始索引，把过滤后的概率 scatter 回去  
+    output_probs.scatter_(-1, sorted_indices, filtered_probs)  
+    """
+    Index: 是原始位置的索引  
+    Sorted_index: “原索引12345”的顺序打乱, 但是对应的value绑定不变  
+    所以index还是指向排序原来的位置, 可以索引回去  
+    """
+    """  
+    如果形状是：(B, S, V), 那么可以理解成：  
+    - output_probs[b, s, :]: 是第 b 个样本、第 s 个位置的原词表顺序概率向量  
+    - scatter_(-1, ...): 就是对每个 (b, s) 单独处理这条长度为 V 的向量  
 
-    # 按照排序前的原始索引，把过滤后的概率 scatter 回去。
-    output_probs.scatter_(-1, sorted_indices, filtered_probs)
+    “对于每个位置，都放回各自操作后的概率值” 
+
+    
+    -1: 表示沿最后一维写
+    当前是一维向量时，最后一维就是这唯一的一维，所以等价于: scatter_(0, ...) 
+
+    如果形状是：(B, S, V), 那么可以理解成：
+    - output_probs[b, s, :]  是第 b 个样本、第 s 个位置的原词表顺序概率向量
+    - scatter_(-1, ...)  就是对每个 (b, s) 单独处理这条长度为 V 的向量
+    """
 
     # 返回恢复到原词表顺序的概率分布。
     return output_probs
@@ -126,7 +170,7 @@ def generate_text(
         tokenizer: 负责文本和 token id 相互转换的 tokenizer
         prompt: 生成起点文本
         max_tokens: 最多新生成多少个 token
-        temperature: 采样温度；越小越保守，越大越随机
+        temperature: 采样温度； 越小logits输出差距越大, 越保守； 越大logits输出差距越小, 越随机
         top_p: nucleus sampling 的累计概率阈值
         device: 生成所使用的设备
         eos_token: 终止生成的特殊 token
@@ -134,38 +178,36 @@ def generate_text(
     Returns:
         最终生成出的完整文本
     """
-    # 切到评估模式，告诉模型接下来是推理而不是训练。
+    # 切到评估模式，告诉模型接下来是推理而不是训练
     model.eval()
 
-    # 先把 prompt 文本编码成 token id 列表。
+    # 先把 prompt 文本编码成 token id 列表
     prompt_tokens = tokenizer.encode(prompt)
 
-    # 把 token 列表转成形状为 (1, seq_len) 的张量，并移动到指定设备。
+    # 把 token 列表转成形状为 (1, seq_len) 的张量，并移动到指定设备
     input_ids = torch.tensor(prompt_tokens, dtype=torch.long, device=device).unsqueeze(0)
 
-    # 复制一份生成结果列表，初始内容就是 prompt 本身对应的 token。
+    # 复制一份生成结果列表，初始内容就是 prompt 本身对应的 token
     generated_tokens = prompt_tokens.copy()
 
     # 生成阶段不需要计算梯度，所以关闭 autograd。
     with torch.no_grad():
         # 最多循环生成 max_tokens 个新 token。
         for _ in range(max_tokens):
+
             # 把当前输入序列送入模型，得到每个位置的 logits。
             logits = model(input_ids)
 
+            
             # 只取最后一个位置的 logits，因为我们现在只关心“下一个 token”。
-            next_token_logits = logits[0, -1, :]
-
+            next_token_logits = logits[0, -1, :] 
             # 把最后一个位置的 logits 变成概率分布。
             probabilities = softmax_with_temperature(next_token_logits, temperature)
-
             # 如果要求 top-p 采样，就进一步裁剪概率分布。
             if top_p < 1.0:
                 probabilities = top_p_sampling(probabilities, top_p)
-
             # 按概率分布随机采样一个下一个 token。
             next_token = torch.multinomial(probabilities, num_samples=1).item()
-
             # 把新采样到的 token id 追加到结果列表里。
             generated_tokens.append(next_token)
 
@@ -177,16 +219,18 @@ def generate_text(
                 # 如果它就是结束符，就提前停止生成。
                 if decoded_token.strip() == eos_token.strip():
                     break
+                
 
             # 把刚生成的 token 包装成形状为 (1, 1) 的张量。
             next_token_tensor = torch.tensor([[next_token]], dtype=torch.long, device=device)
-
             # 把这个 token 拼接到输入序列末尾，供下一轮继续预测。
             input_ids = torch.cat([input_ids, next_token_tensor], dim=1)
+
 
             # 如果当前序列长度超过模型上下文窗口，就只保留最后 context_length 个 token。
             if input_ids.size(1) > model.context_length:
                 input_ids = input_ids[:, -model.context_length:]
+
 
     # 把所有生成得到的 token id 解码回文本。
     generated_text = tokenizer.decode(generated_tokens)
