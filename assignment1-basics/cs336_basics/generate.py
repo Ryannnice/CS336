@@ -197,10 +197,22 @@ def generate_text(
 
             # 把当前输入序列送入模型，得到每个位置的 logits。
             logits = model(input_ids)
+            """
+            如果： input_ids.shape = (1, 20)
+            那么输出就是： logits.shape = (1, 20, vocab_size)
+            """
 
             
-            # 只取最后一个位置的 logits，因为我们现在只关心“下一个 token”。
+            # 只取最后一个位置(索引为 "-1")的 logits，因为我们现在只关心“下一个 token”。
             next_token_logits = logits[0, -1, :] 
+            """
+            [0, -1, :] 解释: 
+            前面这句： input_ids = torch.tensor(prompt_tokens, dtype=torch.long, device=device).unsqueeze(0) 
+            把原本一条 prompt 变成了形状 (1, seq_len)
+            这里最前面的 1 就是 batch size = 1。
+            所以模型输出： logits.shape = (1, seq_len, vocab_size)
+            这时第 0 维只有一个样本，只能取： logits[0, ...]
+            """
             # 把最后一个位置的 logits 变成概率分布。
             probabilities = softmax_with_temperature(next_token_logits, temperature)
             # 如果要求 top-p 采样，就进一步裁剪概率分布。
